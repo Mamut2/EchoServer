@@ -1,12 +1,17 @@
 ﻿using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using static System.Runtime.InteropServices.JavaScript.JSType;
+
+enum PacketType
+{
+    Text
+}
 
 class Server
 {
-    TcpClient[] clients = new TcpClient[20];
-    int n = 0;
+    const int MAX_CLIENTS = 3;
+    TcpClient[] clients = new TcpClient[MAX_CLIENTS + 1];
+    bool[] used = new bool[MAX_CLIENTS + 1];
 
     public Server(int port)
     {
@@ -28,29 +33,61 @@ class Server
             TcpClient client = listener.AcceptTcpClient();
             Log("Client connected!");
 
-            clients[n] = client;
-            ReceivePackets(client, n);
-            n++;
+            int id = GetClientId();
+            if(id != -1)
+            {
+                clients[id] = client;
+                ReceivePackets(client, id);
+            }
+            else
+            {
+                client.Close();
+            }
         }
     }
 
-    Task ReceivePackets(TcpClient client, int clientId)
+    Task ReceivePackets(TcpClient client, int id)
     {
         return Task.Run(() =>
         {
             Byte[] bytes = new Byte[256];
             string? data = null;
 
-            data = null;
             NetworkStream stream = client.GetStream();
 
             int i;
-            while ((i = stream.Read(bytes, 0, bytes.Length)) != 0)
+            try
             {
-                data = Encoding.ASCII.GetString(bytes, 0, i);
-                Log("Received: " + clientId.ToString() + " " + data);
+                while ((i = stream.Read(bytes, 0, bytes.Length)) != 0)
+                {
+                    data = Encoding.ASCII.GetString(bytes, 0, i);
+                    Log("Received: " + id.ToString() + " " + data);
+                }
+            }
+            catch (Exception e)
+            {
+                Log(e.Message);
+                DisconnectClient(id);
             }
         });
+    }
+
+    int GetClientId()
+    {
+        for (int i = 0; i < MAX_CLIENTS; i++)
+            if (!used[i])
+            {
+                used[i] = true;
+                return i;
+            }
+        return -1;
+    }
+
+    void DisconnectClient(int id)
+    {
+        Log("Client " + id + " disconnected");
+        clients[id].Close();
+        used[id] = false;
     }
 
     void Log(string msg)
