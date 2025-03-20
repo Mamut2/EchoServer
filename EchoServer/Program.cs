@@ -10,7 +10,8 @@ public enum PacketType
     Text = 1,
     Disconnect = 2,
     Connect = 3,
-    AssignId = 4
+    AssignId = 4,  
+    Pfp = 5
 }
 
 class Client
@@ -98,21 +99,21 @@ class Server
                         Log(clients[id].username + ": " + data);
                         for(int j = 0; j < MAX_CLIENTS; j++)
                             if (clients[j].Connected)
-                                SendPacket(j, id, data, PacketType.Text).Wait();
+                                SendPacket(j, id, data, PacketType.Text);
                         break;
                     case PacketType.Disconnect:
                         DisconnectClient(id);
                         break;
                     case PacketType.Connect:
-                        SendPacket(id, id, null, PacketType.AssignId).Wait();
+                        SendPacket(id, id, null, PacketType.AssignId);
                         clients[id].username = data;
                         Log(data + " connected!");
                         for (int j = 0; j < MAX_CLIENTS; j++)
                             if (clients[j].Connected)
-                                SendPacket(j, id, data, PacketType.Connect).Wait();
+                                SendPacket(j, id, data, PacketType.Connect);
                         for (int j = 0; j < MAX_CLIENTS; j++)
                             if (clients[j].Connected && j != id)
-                                SendPacket(id, j, clients[j].username, PacketType.Connect).Wait();
+                                SendPacket(id, j, clients[j].username, PacketType.Connect);
                         break;
                 }
             }
@@ -124,9 +125,9 @@ class Server
         }
     }
 
-    Task SendPacket(int clientIdTo, int clientIdFrom, string? data, PacketType packetType)
+    void SendPacket(int clientIdTo, int clientIdFrom, string? data, PacketType packetType)
     {
-        return Task.Run(() =>
+        try
         {
             if (clients[clientIdTo].Connected)
             {
@@ -139,7 +140,11 @@ class Server
 
                 stream.Write(bytes, 0, bytes.Length);
             }
-        });
+        }
+        catch (Exception e)
+        {
+            Log(e.Message);
+        }
     }
 
     int GetClientId()
@@ -158,7 +163,7 @@ class Server
         if (clients[id].Connected)
         {
             Log(clients[id].username + " disconnected");
-            SendPacket(id, -1, null, PacketType.Disconnect).Wait();
+            SendPacket(id, -1, null, PacketType.Disconnect);
             clients[id].tcp.Close();
         }
     }
