@@ -73,14 +73,17 @@ class Server
                 SendUsersInfo(clientId);
             }
 
-            // Receive packets
-            while(true)
+            while (true)
             {
+                if (!client.Connected || !clients.ContainsKey(clientId)) break;
+
                 (type, data) = ReadPacket(stream);
-                switch(type)
+                if (type == null || data == null) break; 
+
+                switch (type)
                 {
                     case PacketType.Message:
-                        string msg = Encoding.UTF8.GetString(data!);
+                        string msg = Encoding.UTF8.GetString(data);
                         Log($"[{clients[clientId].username}] {msg}");
                         BroadcastMessage(clientId, msg);
                         break;
@@ -89,7 +92,7 @@ class Server
         }
         catch
         {
-
+            // Handle exceptions
         }
         finally
         {
@@ -218,10 +221,15 @@ class Server
         {
             try
             {
-                if (clients[clientId].client!.Client.Poll(0, SelectMode.SelectRead))
+                if (!clients.ContainsKey(clientId)) break;
+
+                var client = clients[clientId].client;
+                if (client == null || !client.Connected) break;
+
+                if (client.Client.Poll(0, SelectMode.SelectRead))
                 {
                     byte[] buffer = new byte[1];
-                    if (clients[clientId].client!.Client.Receive(buffer, SocketFlags.Peek) == 0)
+                    if (client.Client.Receive(buffer, SocketFlags.Peek) == 0)
                     {
                         Disconnect(clientId);
                         break;
@@ -242,7 +250,13 @@ class Server
         if (!clients.ContainsKey(clientId)) return;
 
         Log($"{clients[clientId].username} disconnected!");
-        clients[clientId].client.Close();
+
+        try
+        {
+            clients[clientId].client?.Close();
+        }
+        catch { }
+
         clients.TryRemove(clientId, out _);
         BroadcastDisconnect(clientId);
     }
