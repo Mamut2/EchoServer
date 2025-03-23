@@ -1,214 +1,260 @@
-﻿using System.Diagnostics;
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Reflection.PortableExecutable;
 using System.Text;
-
-public enum PacketType
-{
-    Empty = 0,
-    Text = 1,
-    Disconnect = 2,
-    Connect = 3,
-    AssignId = 4,  
-    Pfp = 5
-}
-
-class Client
-{
-    public Client() 
-    {
-        tcp = new TcpClient();
-        username = "";
-    }
-
-    public TcpClient tcp;
-    public string username;
-    public bool Connected { get { return tcp.Connected; } }
-}
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 class Server
 {
-    const int MAX_CLIENTS = 5;
-    Client[] clients = new Client[MAX_CLIENTS];
-    int port;
-    CancellationTokenSource tokenSource;
+    public enum PacketType { UserInfo = 0, Message = 1, Disconnect = 2 }
 
-    public Server(int port, CancellationTokenSource tokenSource)
+    class ClientInfo
     {
-        for(int i = 0; i < MAX_CLIENTS; i++)
-            clients[i] = new Client();
-
-        this.port = port;
-        this.tokenSource = tokenSource;
+        public string? username;
+        public TcpClient? client;
+        public NetworkStream? stream;
+        public byte[]? avatar;
     }
 
-    public void StartServer()
+    static ConcurrentDictionary<string, ClientInfo> clients = new ConcurrentDictionary<string, ClientInfo>();
+
+    static void Main(string[] args)
     {
+        const int port = 13000;
         TcpListener listener = new TcpListener(IPAddress.Loopback, port);
         listener.Start();
+        Log($"Server started on port: {port}");
 
-        Log("Server started on port: " + port.ToString());
-        CancellationToken cancellationToken = tokenSource.Token;
-
-        while (true)
+        while(true)
         {
-
             TcpClient client = listener.AcceptTcpClient();
-
-            int id = GetClientId();
-            if (id != -1)
-            {
-                clients[id].tcp = client;
-                _ = Task.Run(() => ReceivePackets(client, id));
-            }
-            else
-            {
-                client.Close();
-            }
+            ThreadPool.QueueUserWorkItem(HandleClient, client);
         }
     }
 
-    
-    void ReceivePackets(TcpClient client, int id)
+    static void HandleClient(object? obj)
     {
+        TcpClient client = (TcpClient)obj!;
+        string clientId = Guid.NewGuid().ToString();
 
-        Byte[] bytes = new Byte[256];
-        string? data = null;
-
-        NetworkStream stream = client.GetStream();
-
-        int i;
         try
         {
-            while (client.Connected && (i = stream.Read(bytes, 0, bytes.Length)) != 0)
+            // Get user info
+            NetworkStream stream = client.GetStream();
+
+            var (type, data) = ReadPacket(stream);
+            if (type != PacketType.UserInfo) return;
+
+            ClientInfo info;
+            using (MemoryStream ms = new MemoryStream(data!))
+            using (BinaryReader reader = new BinaryReader(ms))
             {
-                PacketType packetType = PacketType.Empty;
-                data = Encoding.ASCII.GetString(bytes, 0, i);
+                string username = reader.ReadString();
+                byte[] avatar = reader.ReadBytes(reader.ReadInt32());
 
-                int fromId;
-                string[] p = data.Split('|');
-                packetType = (PacketType)int.Parse(p[0]);
-                fromId = int.Parse(p[1]);
-                data = "";
-                for (int k = 2; k < p.Length; k++) data += p[k];
-
-                switch (packetType)
+                info = new ClientInfo
                 {
-                    case PacketType.Text:
-                        Log(clients[id].username + ": " + data);
-                        for(int j = 0; j < MAX_CLIENTS; j++)
-                            if (clients[j].Connected)
-                                SendPacket(j, id, data, PacketType.Text);
-                        break;
-                    case PacketType.Disconnect:
-                        DisconnectClient(id);
-                        break;
-                    case PacketType.Connect:
-                        SendPacket(id, id, null, PacketType.AssignId);
-                        clients[id].username = data;
-                        Log(data + " connected!");
-                        for (int j = 0; j < MAX_CLIENTS; j++)
-                            if (clients[j].Connected)
-                                SendPacket(j, id, data, PacketType.Connect);
-                        for (int j = 0; j < MAX_CLIENTS; j++)
-                            if (clients[j].Connected && j != id)
-                                SendPacket(id, j, clients[j].username, PacketType.Connect);
+                    client = client,
+                    stream = stream,
+                    username = username,
+                    avatar = avatar
+                };
+
+                clients.TryAdd(clientId, info);
+                Log($"{username} connected!");
+
+                Thread monitorThread = new Thread(() => MonitorClientConnection(clientId));
+                monitorThread.Start();
+
+                BroadcastUserInfo(clientId, username, avatar);
+                SendUsersInfo(clientId);
+            }
+
+            // Receive packets
+            while(true)
+            {
+                (type, data) = ReadPacket(stream);
+                switch(type)
+                {
+                    case PacketType.Message:
+                        string msg = Encoding.UTF8.GetString(data!);
+                        Log($"[{clients[clientId].username}] {msg}");
+                        BroadcastMessage(clientId, msg);
                         break;
                 }
             }
         }
-        catch (Exception e)
+        catch
         {
-            Log(e.Message);
-            DisconnectClient(id);
+
+        }
+        finally
+        {
+            Disconnect(clientId);
         }
     }
 
-    void SendPacket(int clientIdTo, int clientIdFrom, string? data, PacketType packetType)
+    static void BroadcastUserInfo(string senderId, string username, byte[] avatar)
+    {
+        using (MemoryStream ms = new MemoryStream())
+        using (BinaryWriter writer = new BinaryWriter(ms))
+        {
+            writer.Write(senderId);
+            writer.Write(username);
+            writer.Write(avatar.Length);
+            writer.Write(avatar);
+
+            SendToAll(senderId, PacketType.UserInfo, ms.ToArray());
+        }
+    }
+
+    static void BroadcastMessage(string senderId, string msg)
+    {
+        using (MemoryStream ms = new MemoryStream())
+        using (BinaryWriter writer = new BinaryWriter(ms))
+        {
+            writer.Write(senderId);
+            writer.Write(msg);
+
+            SendToAll(senderId, PacketType.Message, ms.ToArray());
+        }
+    }
+
+    static void BroadcastDisconnect(string senderId)
+    {
+        using (MemoryStream ms = new MemoryStream())
+        using (BinaryWriter writer = new BinaryWriter(ms))
+        {
+            writer.Write(senderId);
+
+            SendToAll(senderId, PacketType.Disconnect, ms.ToArray());
+        }
+    }
+
+    static void SendUsersInfo(string receiverId)
+    {
+        foreach (var client in clients)
+        {
+            if (client.Key == receiverId) continue;
+
+            using (MemoryStream ms = new MemoryStream())
+            using (BinaryWriter writer = new BinaryWriter(ms))
+            {
+                writer.Write(client.Key);
+                writer.Write(client.Value.username!);
+                writer.Write(client.Value.avatar!.Length);
+                writer.Write(client.Value.avatar!);
+
+                SendTo(receiverId, PacketType.UserInfo, ms.ToArray());
+            }
+        }
+    }
+
+    static void SendTo(string receiverId, PacketType type, byte[] data)
+    {
+        byte[] header = new byte[8];
+        BitConverter.GetBytes((int)type).CopyTo(header, 0);
+        BitConverter.GetBytes(data.Length).CopyTo(header, 4);
+
+        try
+        {
+            clients[receiverId].stream!.Write(header, 0, 8);
+            clients[receiverId].stream!.Write(data, 0, data.Length);
+        }
+        catch { Disconnect(receiverId); }
+    }
+
+    static void SendToAll(string senderId, PacketType type, byte[] data)
+    {
+        byte[] header = new byte[8];
+        BitConverter.GetBytes((int)type).CopyTo(header, 0);
+        BitConverter.GetBytes(data.Length).CopyTo(header, 4);
+
+        foreach(var client in clients)
+        {
+            try
+            {
+                client.Value.stream!.Write(header, 0, 8);
+                client.Value.stream!.Write(data, 0, data.Length);
+            }
+            catch { Disconnect(client.Key); }
+        }
+    }
+
+    static (PacketType? type, byte[]? data) ReadPacket(NetworkStream stream)
     {
         try
         {
-            if (clients[clientIdTo].Connected)
+            byte[] header = new byte[8];
+            int bytesRead = stream.Read(header, 0, 8);
+            if (bytesRead != 8) return (0, null);
+
+            int type = BitConverter.ToInt32(header, 0);
+            int length = BitConverter.ToInt32(header, 4);
+
+            byte[] data = new byte[length];
+            int totalRead = 0;
+            while(totalRead < length)
             {
-                NetworkStream stream = clients[clientIdTo].tcp.GetStream();
-                string pt = ((int)packetType).ToString();
-
-                data = pt + '|' + clientIdFrom + '|' + data;
-
-                Byte[] bytes = Encoding.ASCII.GetBytes(data);
-
-                stream.Write(bytes, 0, bytes.Length);
+                int read = stream.Read(data, totalRead, length - totalRead);
+                if (read == 0) return (0, null);
+                totalRead += read;
             }
-        }
-        catch (Exception e)
-        {
-            Log(e.Message);
-        }
-    }
 
-    int GetClientId()
-    {
-        for (int i = 0; i < MAX_CLIENTS; i++)
-        {
-            if (clients[i] == null) clients[i] = new Client();
-            if (clients[i].tcp == null || !clients[i].tcp.Connected)
-                return i;
+            return ((PacketType)type, data);
         }
-        return -1;
-    }
-
-    void DisconnectClient(int id)
-    {
-        if (clients[id].Connected)
+        catch
         {
-            Log(clients[id].username + " disconnected");
-            SendPacket(id, -1, null, PacketType.Disconnect);
-            clients[id].tcp.Close();
+            return (0, null);
         }
     }
 
-    public void CloseServer()
+    static void MonitorClientConnection(string clientId)
     {
-        for (int i = 0; i < MAX_CLIENTS; i++) DisconnectClient(i);
-    }
-
-    void Log(string msg)
-    {
-        Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.Write("[{0}] ", DateTime.Now);
-        Console.ForegroundColor = ConsoleColor.White;
-        Console.WriteLine(msg);
-    }
-}
-
-class Program 
-{
-    static void Main()
-    {
-        CancellationTokenSource tokenSource = new CancellationTokenSource();
-        Server server = new Server(13000, tokenSource);
-        Console.ForegroundColor = ConsoleColor.White;
-        ConsoleClosingHandler.Initialize();
-        ConsoleClosingHandler.OnClosing += (sender, e) =>
-        {
-            server.CloseServer();
-        };
-
-        Task.Run(() =>
-        {
-            server.StartServer();
-        });
-
         while (true)
         {
-            string? input = Console.ReadLine();
-
-            if (input == "exit")
+            try
             {
-                server.CloseServer();
+                if (clients[clientId].client!.Client.Poll(0, SelectMode.SelectRead))
+                {
+                    byte[] buffer = new byte[1];
+                    if (clients[clientId].client!.Client.Receive(buffer, SocketFlags.Peek) == 0)
+                    {
+                        Disconnect(clientId);
+                        break;
+                    }
+                }
+
+                Thread.Sleep(1000);
+            }
+            catch
+            {
                 break;
             }
         }
+    }
+
+    static void Disconnect(string clientId)
+    {
+        if (!clients.ContainsKey(clientId)) return;
+
+        Log($"{clients[clientId].username} disconnected!");
+        clients[clientId].client.Close();
+        clients.TryRemove(clientId, out _);
+        BroadcastDisconnect(clientId);
+    }
+
+    static void Log(string msg)
+    {
+        Task.Run(() =>
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.Write($"[{DateTime.Now}] ");
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine(msg);
+        });
     }
 }
