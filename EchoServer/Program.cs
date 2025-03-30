@@ -24,7 +24,7 @@ class Server
     static void Main(string[] args)
     {
         const int port = 13000;
-        TcpListener listener = new TcpListener(IPAddress.Loopback, port);
+        TcpListener listener = new TcpListener(IPAddress.Any, port);
         listener.Start();
         Log($"Server started on port: {port}");
 
@@ -105,12 +105,51 @@ class Server
         using (MemoryStream ms = new MemoryStream())
         using (BinaryWriter writer = new BinaryWriter(ms))
         {
+            IPEndPoint? ip = clients[senderId].client!.Client.RemoteEndPoint as IPEndPoint;
             writer.Write(senderId);
             writer.Write(username);
             writer.Write(avatar.Length);
             writer.Write(avatar);
+            writer.Write(ip!.Address.ToString());
+            writer.Write(true);
 
-            SendToAll(senderId, PacketType.UserInfo, ms.ToArray());
+            SendTo(senderId, PacketType.UserInfo, ms.ToArray());
+        }
+
+        using (MemoryStream ms = new MemoryStream())
+        using (BinaryWriter writer = new BinaryWriter(ms))
+        {
+            IPEndPoint? ip = clients[senderId].client!.Client.RemoteEndPoint as IPEndPoint;
+            writer.Write(senderId);
+            writer.Write(username);
+            writer.Write(avatar.Length);
+            writer.Write(avatar);
+            writer.Write(ip!.Address.ToString());
+            writer.Write(false);
+
+            SendToAllExept(senderId, senderId, PacketType.UserInfo, ms.ToArray());
+        }
+    }
+
+    static void SendUsersInfo(string receiverId)
+    {
+        foreach (var client in clients)
+        {
+            if (client.Key == receiverId) continue;
+
+            using (MemoryStream ms = new MemoryStream())
+            using (BinaryWriter writer = new BinaryWriter(ms))
+            {
+                IPEndPoint? ip = client.Value.client!.Client.RemoteEndPoint as IPEndPoint;
+                writer.Write(client.Key);
+                writer.Write(client.Value.username!);
+                writer.Write(client.Value.avatar!.Length);
+                writer.Write(client.Value.avatar!);
+                writer.Write(ip!.Address.ToString());
+                writer.Write(false);
+
+                SendTo(receiverId, PacketType.UserInfo, ms.ToArray());
+            }
         }
     }
 
@@ -137,25 +176,6 @@ class Server
         }
     }
 
-    static void SendUsersInfo(string receiverId)
-    {
-        foreach (var client in clients)
-        {
-            if (client.Key == receiverId) continue;
-
-            using (MemoryStream ms = new MemoryStream())
-            using (BinaryWriter writer = new BinaryWriter(ms))
-            {
-                writer.Write(client.Key);
-                writer.Write(client.Value.username!);
-                writer.Write(client.Value.avatar!.Length);
-                writer.Write(client.Value.avatar!);
-
-                SendTo(receiverId, PacketType.UserInfo, ms.ToArray());
-            }
-        }
-    }
-
     static void SendTo(string receiverId, PacketType type, byte[] data)
     {
         byte[] header = new byte[8];
@@ -178,6 +198,25 @@ class Server
 
         foreach(var client in clients)
         {
+            try
+            {
+                client.Value.stream!.Write(header, 0, 8);
+                client.Value.stream!.Write(data, 0, data.Length);
+            }
+            catch { Disconnect(client.Key); }
+        }
+    }
+
+    static void SendToAllExept(string senderId, string exeptClient, PacketType type, byte[] data)
+    {
+        byte[] header = new byte[8];
+        BitConverter.GetBytes((int)type).CopyTo(header, 0);
+        BitConverter.GetBytes(data.Length).CopyTo(header, 4);
+
+        foreach (var client in clients)
+        {
+            if (client.Key == exeptClient) continue;
+
             try
             {
                 client.Value.stream!.Write(header, 0, 8);
